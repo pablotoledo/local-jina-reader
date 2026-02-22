@@ -1,0 +1,36 @@
+[tool.poetry]
+name = "intranet-reader"
+version = "0.1.0"
+description = "Self-hosted URL-to-Markdown using ReaderLM-v2"
+authors = ["Your Name <your@email.com>"]
+readme = "README.md"
+packages = [{include = "app"}]
+
+[tool.poetry.dependencies]
+python           = "^3.11"
+fastapi          = "^0.115"
+uvicorn          = {extras = ["standard"], version = "^0.34"}
+httpx            = "^0.27"
+pydantic-settings = "^2.5"
+redis            = {extras = ["hiredis"], version = "^5.0"}
+# ML stack
+torch            = {version = "^2.3", source = "pytorch-cpu"}
+transformers     = "^4.44"
+accelerate       = "^0.34"
+
+[tool.poetry.group.dev.dependencies]
+pytest           = "^8.3"
+pytest-asyncio   = "^0.24"
+ruff             = "^0.8"
+
+[[tool.poetry.source]]
+name     = "pytorch-cpu"
+url      = "https://download.pytorch.org/whl/cpu"
+priority = "explicit"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
