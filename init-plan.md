@@ -1,189 +1,141 @@
-# DRIVEN SPEC — `intranet-reader`
+# DRIVEN SPEC — `intranet-reader` (ReaderLM-v2 Edition)
 
-> Internal service that replicates the functionality of **r.jina.ai**: converts any URL into clean, structured text ready for LLMs. Built with FastAPI + Poetry + Docker Compose. Zero mandatory external dependencies in production.
+> Internal service that converts any URL into clean Markdown/JSON using **`jinaai/ReaderLM-v2`** running **100% locally**. No external calls. No API keys. FastAPI + Poetry + Docker Compose.
 
 ---
 
-## 1. Context and Motivation
+## 1. Context
 
-### What is r.jina.ai?
+### What is ReaderLM-v2?
 
-[Jina Reader](https://jina.ai/reader/) is a public service (Apache-2.0) by Jina AI that converts any URL into clean Markdown/JSON, optimized for RAG and LLM agents. Using it is as simple as prefixing the destination URL:
+[`jinaai/ReaderLM-v2`](https://huggingface.co/jinaai/ReaderLM-v2) is the model that **powers** `r.jina.ai` internally. It is open-weight, and we can run it on our own server.
 
-```
-GET https://r.jina.ai/https://example.com
-```
-
-It returns the main content of the page as Markdown, removing noise (navbars, scripts, ads). It supports:
-
-- Static pages and SPAs (via Puppeteer/headless Chrome)
-- Native PDFs
-- Search mode (`s.jina.ai`)
-- JSON response (`Accept: application/json`)
-- Streaming (`Accept: text/event-stream`)
-
-### Why self-hosted?
-
-| Reason | Detail |
+| Feature | Detail |
 |---|---|
-| **Privacy** | Intranet URLs never leave the network |
-| **Rate limits** | No external limits (RPM/TPM per IP) |
-| **Latency** | No round-trip to external servers |
-| **Control** | You can cache, audit, and extend |
-| **No API key** | No quota usage for internal use |
+| **Parameters** | 1.5B (base: Qwen2.5-1.5B-Instruction) |
+| **Task** | Raw HTML → Markdown **or** JSON |
+| **Context** | Up to 512K input + output tokens |
+| **Languages** | 29 (including Spanish) |
+| **License** | `cc-by-nc-4.0` ⚠️ — **non-commercial** use |
+| **Weights** | ~3 GB (safetensors float32) |
+| **CPU** | Works, slow (~5-15 s/simple page) |
+| **Recommended GPU** | Free T4 (Colab), RTX 3090/4090 production |
 
-### HuggingFace — Optional local model
-
-[`jinaai/ReaderLM-v2`](https://huggingface.co/jinaai/ReaderLM-v2) is a 1.5B parameter model trained to convert raw HTML → Markdown/JSON. It enables a **completely offline** mode without calling `r.jina.ai`. It is the alternative when:
-
-- The destination URL is accessible from the server but there is no internet access
-- Total control of the extraction pipeline is needed
+> ⚠️ **cc-by-nc-4.0 License**: Free for internal/intranet non-commercial use. If your intranet is part of a business generating direct income with this service, check with your legal team.
 
 ---
 
-## 2. Architecture
+### Full Pipeline
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                  intranet-reader                    │
-│                                                     │
-│  ┌──────────────┐     ┌────────────────────────┐   │
-│  │   FastAPI    │────▶│   ReaderService        │   │
-│  │   :8000      │     │  (strategy pattern)    │   │
-│  └──────────────┘     └─────────┬──────────────┘   │
-│                                 │                   │
-│              ┌──────────────────┼──────────┐        │
-│              ▼                  ▼          ▼        │
-│        ┌──────────┐  ┌──────────────┐  ┌───────┐   │
-│        │ JinaProxy│  │ LocalFetcher │  │ Cache │   │
-│        │(r.jina.ai│  │(httpx+bs4)   │  │(Redis)│   │
-│        │ fallback)│  │              │  │       │   │
-│        └──────────┘  └──────────────┘  └───────┘   │
-└─────────────────────────────────────────────────────┘
-         Docker Compose — internal network
+GET /r/{url}  ──▶  1. httpx fetch HTML
+                   2. regex clean HTML    (official patterns from ReaderLM-v2 README)
+                   3. ReaderLM-v2 infer   (run_in_executor → does not block event loop)
+                   4. cache Redis
+                        ▼
+                   Markdown / JSON
+```
+
+The model is loaded **only once** at startup (`lifespan`) and stays in memory. Concurrent requests are queued via `asyncio.run_in_executor`.
+
+---
+
+## 2. Repository Structure
+
+```
+intranet-reader/
+├── DRIVEN_SPEC.md
+├── README.md
+├── pyproject.toml
+├── poetry.lock
+├── .env.example
+├── Dockerfile
+├── docker-compose.yml
+├── docker-compose.override.yml
+├── app/
+│   ├── __init__.py
+│   ├── main.py
+│   ├── config.py
+│   ├── routers/
+│   │   ├── __init__.py
+│   │   ├── reader.py
+│   │   └── health.py
+│   ├── services/
+│   │   ├── __init__.py
+│   │   ├── reader_service.py
+│   │   ├── html_fetcher.py
+│   │   ├── ml_engine.py
+│   │   └── cache.py
+│   └── models/
+│       ├── __init__.py
+│       └── schemas.py
+└── tests/
+    ├── __init__.py
+    ├── test_health.py
+    └── test_reader.py
 ```
 
 ### Docker Compose Services
 
-| Service | Image | Port | Role |
-|---|---|---|---|
-| `api` | local build | `8000` | Main FastAPI |
-| `redis` | `redis:7-alpine` | `6379` | Results cache |
+| Service | Role | Port |
+|---|---|---|
+| `api` | FastAPI + ReaderLM-v2 | `8000` |
+| `redis` | Results cache | `6379` |
 
-> **Note:** The ReaderLM-v2 model is optional (`profiles: [ml]`) and requires a GPU. For CPU-only, the local fetcher or the proxy to Jina Cloud is used.
-
----
-
-## 3. Repository Structure
-
-```
-intranet-reader/
-├── DRIVEN_SPEC.md          ← this document
-├── README.md
-├── pyproject.toml          ← Poetry
-├── poetry.lock
-├── .env.example
-├── docker-compose.yml
-├── docker-compose.override.yml   ← dev overrides
-├── Dockerfile
-├── app/
-│   ├── __init__.py
-│   ├── main.py             ← FastAPI app, lifespan
-│   ├── config.py           ← Settings (pydantic-settings)
-│   ├── routers/
-│   │   ├── __init__.py
-│   │   ├── reader.py       ← GET/POST /r/{url}
-│   │   └── health.py       ← GET /health
-│   ├── services/
-│   │   ├── __init__.py
-│   │   ├── reader_service.py    ← orchestrator
-│   │   ├── jina_proxy.py        ← calls r.jina.ai
-│   │   ├── local_fetcher.py     ← httpx + bs4 + markdownify
-│   │   └── cache.py             ← Redis wrapper
-│   ├── models/
-│   │   ├── __init__.py
-│   │   └── schemas.py      ← Pydantic models I/O
-│   └── utils/
-│       ├── __init__.py
-│       └── html_cleaner.py ← optional HTML cleaning
-└── tests/
-    ├── __init__.py
-    ├── test_reader.py
-    └── test_health.py
-```
+Model weights (~3 GB) are persisted in the `hf-cache` Docker volume. They are only downloaded the first time.
 
 ---
 
-## 4. API Contracts
+## 3. API
 
 ### `GET /r/{url:path}`
 
-Converts a URL into Markdown/JSON. Exactly mimics `r.jina.ai`.
-
-**Request:**
-
 ```
 GET /r/https://example.com
-Authorization: Bearer <OPTIONAL_INTERNAL_TOKEN>
-Accept: text/markdown          # default
-Accept: application/json       # JSON mode
-x-no-cache: true               # skip cache
-x-timeout: 30                  # seconds
+Accept: text/markdown          # default — returns plain Markdown
+Accept: application/json       # returns structured JSON
+x-no-cache: true               # skip Redis cache
 ```
 
-**Response 200 (Markdown):**
-
+**Markdown Response (200):**
 ```
 Title: Example Domain
 
+# Example Domain
+
 This domain is for use in illustrative examples...
 
-URL Source: https://example.com
+Source: https://example.com
 ```
 
-**Response 200 (JSON):**
-
+**JSON Response (200):**
 ```json
 {
   "url": "https://example.com",
   "title": "Example Domain",
-  "content": "This domain is for use in illustrative examples...",
-  "description": "...",
+  "content": "# Example Domain\n\nThis domain is for...",
   "usage": { "tokens": 312 },
   "cached": false,
-  "fetched_at": "2026-02-22T10:00:00Z"
+  "fetched_at": "2026-02-22T10:00:00+00:00"
 }
 ```
-
-**Errors:**
-
-| Code | Cause |
-|---|---|
-| `422` | Invalid URL |
-| `504` | Timeout retrieving the URL |
-| `502` | Backend (Jina/fetcher) failed |
-
----
 
 ### `POST /r`
 
-For URLs with fragments (`#`) or special parameters.
+For URLs with fragments (`#`) or special needs:
 
 ```json
-{
-  "url": "https://example.com/#/path",
-  "accept": "application/json",
-  "no_cache": false
-}
+{ "url": "https://example.com/#/path", "accept": "application/json", "no_cache": false }
 ```
-
----
 
 ### `GET /health`
 
 ```json
 {
   "status": "ok",
+  "model": "jinaai/ReaderLM-v2",
+  "model_loaded": true,
+  "device": "cpu",
   "redis": "connected",
   "version": "0.1.0"
 }
@@ -191,35 +143,7 @@ For URLs with fragments (`#`) or special parameters.
 
 ---
 
-## 5. Configuration — `.env.example`
-
-```dotenv
-# ── Application ─────────────────────────────────────
-APP_ENV=production
-APP_PORT=8000
-INTERNAL_TOKEN=              # leave empty = no auth
-
-# ── Reading Strategy ────────────────────────────────
-# "proxy"  → delegate to r.jina.ai (requires internet access)
-# "local"  → httpx + bs4 + markdownify (no internet)
-# "auto"   → tries local, fallback to proxy
-READER_STRATEGY=auto
-
-# ── Jina Cloud (only if READER_STRATEGY=proxy or auto) ─
-JINA_API_KEY=                # optional; no key = free tier
-
-# ── Cache ───────────────────────────────────────────
-REDIS_URL=redis://redis:6379/0
-CACHE_TTL_SECONDS=3600       # 0 = disabled
-
-# ── Local Fetcher ───────────────────────────────────
-FETCH_TIMEOUT_SECONDS=30
-FETCH_USER_AGENT=intranet-reader/0.1
-```
-
----
-
-## 6. Code Files — complete specification
+## 4. Code Files
 
 ### `pyproject.toml`
 
@@ -227,28 +151,32 @@ FETCH_USER_AGENT=intranet-reader/0.1
 [tool.poetry]
 name = "intranet-reader"
 version = "0.1.0"
-description = "Self-hosted r.jina.ai for intranet"
+description = "Self-hosted URL-to-Markdown using ReaderLM-v2"
 authors = ["Your Name <your@email.com>"]
 readme = "README.md"
 packages = [{include = "app"}]
 
 [tool.poetry.dependencies]
-python = "^3.11"
-fastapi = "^0.115"
-uvicorn = {extras = ["standard"], version = "^0.34"}
-httpx = "^0.27"
-beautifulsoup4 = "^4.12"
-markdownify = "^0.13"
-redis = {extras = ["hiredis"], version = "^5.0"}
+python           = "^3.11"
+fastapi          = "^0.115"
+uvicorn          = {extras = ["standard"], version = "^0.34"}
+httpx            = "^0.27"
 pydantic-settings = "^2.5"
-lxml = "^5.3"
+redis            = {extras = ["hiredis"], version = "^5.0"}
+# ML stack
+torch            = {version = "^2.3", source = "pytorch-cpu"}
+transformers     = "^4.44"
+accelerate       = "^0.34"
 
 [tool.poetry.group.dev.dependencies]
-pytest = "^8.3"
-pytest-asyncio = "^0.24"
-httpx = "^0.27"          # async TestClient
-ruff = "^0.8"
-mypy = "^1.13"
+pytest           = "^8.3"
+pytest-asyncio   = "^0.24"
+ruff             = "^0.8"
+
+[[tool.poetry.source]]
+name     = "pytorch-cpu"
+url      = "https://download.pytorch.org/whl/cpu"
+priority = "explicit"
 
 [build-system]
 requires = ["poetry-core"]
@@ -256,9 +184,33 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+```
 
-[tool.ruff]
-line-length = 100
+> **GPU**: Change torch source to `https://download.pytorch.org/whl/cu121` and use `nvidia/cuda` base image in the Dockerfile.
+
+---
+
+### `.env.example`
+
+```dotenv
+# API
+APP_PORT=8000
+INTERNAL_TOKEN=
+
+# Model
+HF_MODEL_ID=jinaai/ReaderLM-v2
+HF_HOME=/root/.cache/huggingface
+DEVICE=cpu
+MAX_NEW_TOKENS=4096
+TORCH_DTYPE=float32
+
+# Cache
+REDIS_URL=redis://redis:6379/0
+CACHE_TTL_SECONDS=3600
+
+# Fetcher
+FETCH_TIMEOUT_SECONDS=30
+FETCH_USER_AGENT=intranet-reader/0.1
 ```
 
 ---
@@ -267,20 +219,19 @@ line-length = 100
 
 ```python
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from typing import Literal
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
-    app_env: str = "production"
     app_port: int = 8000
     internal_token: str = ""
 
-    reader_strategy: Literal["proxy", "local", "auto"] = "auto"
-
-    jina_api_key: str = ""
-    jina_reader_base: str = "https://r.jina.ai"
+    hf_model_id: str = "jinaai/ReaderLM-v2"
+    hf_home: str = "/root/.cache/huggingface"
+    device: str = "cpu"
+    max_new_tokens: int = 4096
+    torch_dtype: str = "float32"
 
     redis_url: str = "redis://redis:6379/0"
     cache_ttl_seconds: int = 3600
@@ -294,32 +245,126 @@ settings = Settings()
 
 ---
 
-### `app/models/schemas.py`
+### `app/services/html_fetcher.py`
+
+Downloads and cleans HTML with the same regex patterns recommended by the official ReaderLM-v2 README.
 
 ```python
-from pydantic import BaseModel, HttpUrl
-from datetime import datetime
+import re
+import httpx
+from app.config import settings
+
+# Patterns extracted from jinaai/ReaderLM-v2 README
+SCRIPT_PATTERN     = r"<[ ]*script.*?\/[ ]*script[ ]*>"
+STYLE_PATTERN      = r"<[ ]*style.*?\/[ ]*style[ ]*>"
+META_PATTERN       = r"<[ ]*meta.*?>"
+COMMENT_PATTERN    = r"<[ ]*!--.*?--[ ]*>"
+LINK_PATTERN       = r"<[ ]*link.*?>"
+BASE64_IMG_PATTERN = r'<img[^>]+src="data:image/[^;]+;base64,[^"]+"[^>]*>'
+SVG_PATTERN        = r"(<svg[^>]*>)(.*?)(<\/svg>)"
+FLAGS              = re.IGNORECASE | re.DOTALL
+
+
+def clean_html(html: str) -> str:
+    html = re.sub(SCRIPT_PATTERN,     "",                           html, flags=FLAGS)
+    html = re.sub(STYLE_PATTERN,      "",                           html, flags=FLAGS)
+    html = re.sub(META_PATTERN,       "",                           html, flags=FLAGS)
+    html = re.sub(COMMENT_PATTERN,    "",                           html, flags=FLAGS)
+    html = re.sub(LINK_PATTERN,       "",                           html, flags=FLAGS)
+    html = re.sub(BASE64_IMG_PATTERN, "<img/>",                     html, flags=FLAGS)
+    html = re.sub(SVG_PATTERN,        r"\1this is a placeholder\3", html, flags=FLAGS)
+    return html.strip()
+
+
+async def fetch_html(url: str) -> tuple[str, str]:
+    """Returns (clean_html, title)"""
+    headers = {"User-Agent": settings.fetch_user_agent}
+    async with httpx.AsyncClient(
+        timeout=settings.fetch_timeout_seconds,
+        follow_redirects=True,
+    ) as client:
+        r = await client.get(url, headers=headers)
+        r.raise_for_status()
+
+    title = ""
+    m = re.search(r"<title[^>]*>(.*?)<\/title>", r.text, re.IGNORECASE | re.DOTALL)
+    if m:
+        title = re.sub(r"<[^>]+>", "", m.group(1)).strip()
+
+    return clean_html(r.text), title
+```
+
+---
+
+### `app/services/ml_engine.py`
+
+```python
+import asyncio
+import os
+from functools import partial
 from typing import Literal
 
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
-class ReadRequest(BaseModel):
-    url: str
-    accept: Literal["text/markdown", "application/json"] = "text/markdown"
-    no_cache: bool = False
+from app.config import settings
 
-
-class UsageInfo(BaseModel):
-    tokens: int
+_tokenizer = None
+_model = None
 
 
-class ReadResponse(BaseModel):
-    url: str
-    title: str
-    content: str
-    description: str = ""
-    usage: UsageInfo
-    cached: bool = False
-    fetched_at: datetime
+def load_model() -> None:
+    global _tokenizer, _model
+    os.environ["HF_HOME"] = settings.hf_home
+    dtype = torch.float16 if settings.torch_dtype == "float16" else torch.float32
+
+    print(f"[ml_engine] Loading {settings.hf_model_id} → device={settings.device} dtype={dtype}")
+    _tokenizer = AutoTokenizer.from_pretrained(settings.hf_model_id)
+    _model = AutoModelForCausalLM.from_pretrained(
+        settings.hf_model_id,
+        torch_dtype=dtype,
+    ).to(settings.device)
+    _model.eval()
+    print("[ml_engine] Model ready ✓")
+
+
+def _infer_sync(html: str, output_format: Literal["markdown", "json"]) -> str:
+    """Blocking — always execute in run_in_executor."""
+    if output_format == "json":
+        prompt = (
+            "Extract the main content of the following HTML and return a JSON object "
+            "with keys: title, description, content (markdown string).\n\n" + html
+        )
+    else:
+        prompt = html  # HTML→Markdown: no instruction, just the HTML
+
+    messages = [{"role": "user", "content": prompt}]
+    input_text = _tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+    inputs = _tokenizer.encode(input_text, return_tensors="pt").to(settings.device)
+
+    with torch.no_grad():
+        outputs = _model.generate(
+            inputs,
+            max_new_tokens=settings.max_new_tokens,
+            temperature=0,
+            do_sample=False,
+            repetition_penalty=1.08,
+        )
+
+    new_tokens = outputs[0][inputs.shape[1]:]
+    return _tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+
+
+async def html_to_markdown(html: str) -> str:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, partial(_infer_sync, html, "markdown"))
+
+
+async def html_to_json_str(html: str) -> str:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, partial(_infer_sync, html, "json"))
 ```
 
 ---
@@ -327,8 +372,8 @@ class ReadResponse(BaseModel):
 ### `app/services/cache.py`
 
 ```python
-import json
 import hashlib
+import json
 import redis.asyncio as aioredis
 from app.config import settings
 
@@ -353,83 +398,9 @@ async def set_cached(url: str, data: dict) -> None:
         return
     client = aioredis.from_url(settings.redis_url, decode_responses=True)
     try:
-        await client.setex(_key(url), settings.cache_ttl_seconds, json.dumps(data))
+        await client.setex(_key(url), settings.cache_ttl_seconds, json.dumps(data, default=str))
     finally:
         await client.aclose()
-```
-
----
-
-### `app/services/local_fetcher.py`
-
-```python
-import httpx
-from bs4 import BeautifulSoup
-from markdownify import markdownify as md
-from app.config import settings
-
-
-async def fetch_as_markdown(url: str) -> dict:
-    headers = {"User-Agent": settings.fetch_user_agent}
-    async with httpx.AsyncClient(timeout=settings.fetch_timeout_seconds, follow_redirects=True) as client:
-        resp = client.build_request("GET", url, headers=headers)
-        r = await client.send(resp)
-        r.raise_for_status()
-        html = r.text
-
-    soup = BeautifulSoup(html, "lxml")
-
-    # clean noise
-    for tag in soup(["script", "style", "nav", "footer", "aside", "header"]):
-        tag.decompose()
-
-    title = soup.title.string.strip() if soup.title else ""
-    description = ""
-    meta_desc = soup.find("meta", attrs={"name": "description"})
-    if meta_desc and meta_desc.get("content"):
-        description = meta_desc["content"]
-
-    main = soup.find("main") or soup.find("article") or soup.body or soup
-    content = md(str(main), heading_style="ATX", strip=["a"]).strip()
-    tokens = len(content.split())
-
-    return {
-        "url": url,
-        "title": title,
-        "content": content,
-        "description": description,
-        "usage": {"tokens": tokens},
-    }
-```
-
----
-
-### `app/services/jina_proxy.py`
-
-```python
-import httpx
-from app.config import settings
-
-
-async def fetch_via_jina(url: str) -> dict:
-    target = f"{settings.jina_reader_base}/{url}"
-    headers = {"Accept": "application/json"}
-    if settings.jina_api_key:
-        headers["Authorization"] = f"Bearer {settings.jina_api_key}"
-
-    async with httpx.AsyncClient(timeout=settings.fetch_timeout_seconds) as client:
-        r = await client.get(target, headers=headers)
-        r.raise_for_status()
-        data = r.json()
-
-    # normalize Jina response
-    return {
-        "url": url,
-        "title": data.get("data", {}).get("title", ""),
-        "content": data.get("data", {}).get("content", ""),
-        "description": data.get("data", {}).get("description", ""),
-        "usage": {"tokens": data.get("data", {}).get("usage", {}).get("tokens", 0)},
-    }
 ```
 
 ---
@@ -438,42 +409,33 @@ async def fetch_via_jina(url: str) -> dict:
 
 ```python
 from datetime import datetime, timezone
-from app.config import settings
 from app.services.cache import get_cached, set_cached
-from app.services.local_fetcher import fetch_as_markdown
-from app.services.jina_proxy import fetch_via_jina
-import httpx
+from app.services.html_fetcher import fetch_html
+from app.services.ml_engine import html_to_markdown, html_to_json_str
 
 
-async def read_url(url: str, no_cache: bool = False) -> dict:
+async def read_url(url: str, as_json: bool = False, no_cache: bool = False) -> dict:
+    cache_key = f"{url}:{'json' if as_json else 'md'}"
+
     if not no_cache:
-        cached = await get_cached(url)
+        cached = await get_cached(cache_key)
         if cached:
             cached["cached"] = True
             return cached
 
-    data = await _fetch(url)
-    data["cached"] = False
-    data["fetched_at"] = datetime.now(timezone.utc).isoformat()
+    html, title = await fetch_html(url)
+    content = await html_to_json_str(html) if as_json else await html_to_markdown(html)
 
-    await set_cached(url, data)
+    data = {
+        "url": url,
+        "title": title,
+        "content": content,
+        "usage": {"tokens": len(content.split())},
+        "cached": False,
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await set_cached(cache_key, data)
     return data
-
-
-async def _fetch(url: str) -> dict:
-    strategy = settings.reader_strategy
-
-    if strategy == "local":
-        return await fetch_as_markdown(url)
-
-    if strategy == "proxy":
-        return await fetch_via_jina(url)
-
-    # auto: tries local, fallback to proxy
-    try:
-        return await fetch_as_markdown(url)
-    except (httpx.HTTPError, Exception):
-        return await fetch_via_jina(url)
 ```
 
 ---
@@ -481,10 +443,10 @@ async def _fetch(url: str) -> dict:
 ### `app/routers/reader.py`
 
 ```python
-from fastapi import APIRouter, Request, Header
+from fastapi import APIRouter, Header
 from fastapi.responses import PlainTextResponse, JSONResponse
-from app.services.reader_service import read_url
 from app.models.schemas import ReadRequest
+from app.services.reader_service import read_url
 
 router = APIRouter()
 
@@ -493,24 +455,25 @@ router = APIRouter()
 async def read_get(
     url: str,
     accept: str = Header(default="text/markdown"),
-    x_no_cache: bool = Header(default=False),
+    x_no_cache: bool = Header(default=False, alias="x-no-cache"),
 ):
-    data = await read_url(url, no_cache=x_no_cache)
-    if "application/json" in accept:
+    as_json = "application/json" in accept
+    data = await read_url(url, as_json=as_json, no_cache=x_no_cache)
+    if as_json:
         return JSONResponse(content=data)
-    # plain markdown
     return PlainTextResponse(
-        content=f"Title: {data['title']}\n\n{data['content']}\n\nURL Source: {data['url']}"
+        f"Title: {data['title']}\n\n{data['content']}\n\nSource: {data['url']}"
     )
 
 
 @router.post("/r")
 async def read_post(body: ReadRequest):
-    data = await read_url(body.url, no_cache=body.no_cache)
-    if body.accept == "application/json":
+    as_json = body.accept == "application/json"
+    data = await read_url(body.url, as_json=as_json, no_cache=body.no_cache)
+    if as_json:
         return JSONResponse(content=data)
     return PlainTextResponse(
-        content=f"Title: {data['title']}\n\n{data['content']}\n\nURL Source: {data['url']}"
+        f"Title: {data['title']}\n\n{data['content']}\n\nSource: {data['url']}"
     )
 ```
 
@@ -522,6 +485,7 @@ async def read_post(body: ReadRequest):
 from fastapi import APIRouter
 import redis.asyncio as aioredis
 from app.config import settings
+from app.services import ml_engine
 
 router = APIRouter()
 
@@ -532,15 +496,17 @@ async def health():
     try:
         client = aioredis.from_url(settings.redis_url)
         await client.ping()
-        redis_status = "connected"
         await client.aclose()
+        redis_status = "connected"
     except Exception:
         pass
 
     return {
         "status": "ok",
+        "model": settings.hf_model_id,
+        "model_loaded": ml_engine._model is not None,
+        "device": settings.device,
         "redis": redis_status,
-        "strategy": settings.reader_strategy,
         "version": "0.1.0",
     }
 ```
@@ -553,26 +519,27 @@ async def health():
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import reader, health
 from app.config import settings
+from app.routers import reader, health
+from app.services import ml_engine
 
 
-def verify_token(authorization: str | None = None):
+def _verify_token(authorization: str | None = None):
     if not settings.internal_token:
-        return  # auth disabled
+        return
     if authorization != f"Bearer {settings.internal_token}":
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print(f"[intranet-reader] strategy={settings.reader_strategy}")
+    ml_engine.load_model()   # blocks until the model is ready
     yield
 
 
 app = FastAPI(
     title="intranet-reader",
-    description="Self-hosted r.jina.ai for internal use",
+    description="URL → Markdown/JSON using ReaderLM-v2 (100% local)",
     version="0.1.0",
     lifespan=lifespan,
 )
@@ -585,7 +552,7 @@ app.add_middleware(
 )
 
 app.include_router(health.router)
-app.include_router(reader.router, dependencies=[Depends(verify_token)])
+app.include_router(reader.router, dependencies=[Depends(_verify_token)])
 ```
 
 ---
@@ -593,25 +560,24 @@ app.include_router(reader.router, dependencies=[Depends(verify_token)])
 ### `Dockerfile`
 
 ```dockerfile
-FROM python:3.11-slim
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl build-essential \
-    && rm -rf /var/lib/apt/lists/*
+FROM python:3.11-slim AS builder
 
 RUN pip install poetry==1.8.3
-
 WORKDIR /app
-
 COPY pyproject.toml poetry.lock* ./
-
-RUN poetry config virtualenvs.create false \
+RUN poetry config virtualenvs.in-project true \
     && poetry install --no-interaction --no-ansi --only main
 
+FROM python:3.11-slim
+WORKDIR /app
+COPY --from=builder /app/.venv .venv
 COPY app/ ./app/
 
-EXPOSE 8000
+ENV PATH="/app/.venv/bin:$PATH"
+ENV PYTHONUNBUFFERED=1
+ENV HF_HOME=/root/.cache/huggingface
 
+EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 ```
 
@@ -628,11 +594,21 @@ services:
     ports:
       - "${APP_PORT:-8000}:8000"
     env_file: .env
+    volumes:
+      - hf-cache:/root/.cache/huggingface   # persisted model weights
     depends_on:
       redis:
         condition: service_healthy
     networks:
       - reader-net
+    # GPU — uncomment if you have NVIDIA Container Toolkit
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
 
   redis:
     image: redis:7-alpine
@@ -649,6 +625,7 @@ services:
       - reader-net
 
 volumes:
+  hf-cache:      # ~3 GB — ReaderLM-v2 weights
   redis-data:
 
 networks:
@@ -664,7 +641,8 @@ networks:
 services:
   api:
     volumes:
-      - ./app:/app/app       # hot-reload
+      - ./app:/app/app
+      - hf-cache:/root/.cache/huggingface
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     environment:
       APP_ENV: development
@@ -672,76 +650,19 @@ services:
 
 ---
 
-## 7. Reference README
-
-*(The repo's `README.md` should contain this)*
-
-```markdown
-# intranet-reader
-
-Self-hosted reader service inspired by [r.jina.ai](https://r.jina.ai).  
-Converts any URL into clean Markdown/JSON, ready for LLMs and RAG.
-
-## Quick Start
-
-    cp .env.example .env
-    docker compose up -d
-
-## Usage
-
-### cURL — Markdown
-    curl http://localhost:8000/r/https://example.com
-
-### cURL — JSON
-    curl -H "Accept: application/json" http://localhost:8000/r/https://example.com
-
-### Python — httpx
-    import httpx
-    r = httpx.get("http://localhost:8000/r/https://example.com",
-                  headers={"Accept": "application/json"})
-    print(r.json()["content"])
-
-### Skip cache
-    curl -H "x-no-cache: true" http://localhost:8000/r/https://example.com
-
-## Key Environment Variables
-
-| Variable | Default | Description |
-|---|---|---|
-| `READER_STRATEGY` | `auto` | `local`, `proxy`, `auto` |
-| `JINA_API_KEY` | — | Jina Cloud API key (optional) |
-| `CACHE_TTL_SECONDS` | `3600` | Redis cache TTL; `0` = off |
-| `INTERNAL_TOKEN` | — | Internal Bearer token; empty = no auth |
-
-## Reading Strategies
-
-- **`local`** — no internet access. Uses httpx + BeautifulSoup + markdownify. Ideal for intranet URLs.
-- **`proxy`** — delegates to `r.jina.ai`. Requires internet access. Better quality on complex webs/SPAs.
-- **`auto`** — tries `local`, if it fails uses `proxy` as fallback.
-
-## Useful Commands
-
-    # tests
-    poetry run pytest
-
-    # lint
-    poetry run ruff check app/
-
-    # shell in the container
-    docker compose exec api bash
-```
-
----
-
-## 8. Minimum Tests
+## 5. Tests
 
 ### `tests/test_health.py`
 
 ```python
-from fastapi.testclient import TestClient
-from app.main import app
+from unittest.mock import patch
 
+with patch("app.services.ml_engine.load_model", return_value=None):
+    from app.main import app
+
+from fastapi.testclient import TestClient
 client = TestClient(app)
+
 
 def test_health():
     r = client.get("/health")
@@ -752,72 +673,85 @@ def test_health():
 ### `tests/test_reader.py`
 
 ```python
-import pytest
-from unittest.mock import AsyncMock, patch
-from fastapi.testclient import TestClient
-from app.main import app
+from unittest.mock import patch, AsyncMock
 
-client = TestClient(app)
-
-MOCK_DATA = {
+MOCK = {
     "url": "https://example.com",
-    "title": "Example",
-    "content": "Hello world",
-    "description": "",
-    "usage": {"tokens": 2},
+    "title": "Example Domain",
+    "content": "# Example\n\nThis domain is for illustrative examples.",
+    "usage": {"tokens": 12},
     "cached": False,
-    "fetched_at": "2026-01-01T00:00:00+00:00",
+    "fetched_at": "2026-02-22T10:00:00+00:00",
 }
 
+with patch("app.services.ml_engine.load_model", return_value=None):
+    from app.main import app
 
-@patch("app.routers.reader.read_url", new_callable=AsyncMock, return_value=MOCK_DATA)
-def test_read_markdown(mock_read):
+from fastapi.testclient import TestClient
+client = TestClient(app)
+
+
+@patch("app.routers.reader.read_url", new_callable=AsyncMock, return_value=MOCK)
+def test_markdown(mock_read):
     r = client.get("/r/https://example.com")
     assert r.status_code == 200
-    assert "Example" in r.text
+    assert "Example Domain" in r.text
 
 
-@patch("app.routers.reader.read_url", new_callable=AsyncMock, return_value=MOCK_DATA)
-def test_read_json(mock_read):
+@patch("app.routers.reader.read_url", new_callable=AsyncMock, return_value=MOCK)
+def test_json(mock_read):
     r = client.get("/r/https://example.com", headers={"Accept": "application/json"})
     assert r.status_code == 200
-    assert r.json()["title"] == "Example"
+    assert r.json()["title"] == "Example Domain"
 ```
 
 ---
 
-## 9. Implementation Checklist
+## 6. Estimated Performance
+
+| Scenario | p50 Latency | Notes |
+|---|---|---|
+| CPU — simple page (~500 tokens) | 5–15 s | Sufficient for intranet |
+| CPU — long page (~5K tokens) | 30–90 s | Use aggressive caching |
+| GPU T4 | ~3 s | Google Colab free tier |
+| GPU RTX 3090/4090 | ~1 s | Recommended for production |
+| Redis cache hit | < 50 ms | — |
+
+**Intranet Tip:** with `CACHE_TTL_SECONDS=86400` (24h) most internal pages are served from cache in milliseconds.
+
+---
+
+## 7. Checklist
 
 ```
-[ ] Create repo: git init intranet-reader
-[ ] poetry new . --name intranet-reader (or poetry init)
-[ ] Copy file structure according to §3
-[ ] cp .env.example .env and adjust variables
+[ ] git init intranet-reader && cd intranet-reader
+[ ] Create directory structure
+[ ] Copy all spec files
+[ ] poetry install  (installs dependencies locally for dev)
+[ ] cp .env.example .env  → adjust DEVICE, MAX_NEW_TOKENS
 [ ] docker compose up -d --build
-[ ] curl http://localhost:8000/health  →  {"status":"ok"}
+[ ] Wait for the first model download (~3 GB, ~5 min)
+[ ] curl http://localhost:8000/health  → "model_loaded": true
 [ ] curl http://localhost:8000/r/https://example.com
 [ ] poetry run pytest
-[ ] Adjust READER_STRATEGY according to network (local/proxy/auto)
-[ ] (Optional) Configure INTERNAL_TOKEN for internal auth
-[ ] (Optional) Expose via nginx/traefik on the intranet
+[ ] (Optional) DEVICE=cuda + TORCH_DTYPE=float16 for GPU
+[ ] (Optional) INTERNAL_TOKEN for internal auth
+[ ] (Optional) Expose via nginx on the intranet
 ```
 
 ---
 
-## 10. References
+## 8. References
 
 | Resource | URL |
 |---|---|
-| Jina Reader — API Docs | https://jina.ai/reader/ |
-| jina-ai/reader — GitHub (Apache-2.0) | https://github.com/jina-ai/reader |
-| jinaai/ReaderLM-v2 — HuggingFace | https://huggingface.co/jinaai/ReaderLM-v2 |
-| Community Docker fork | https://github.com/intergalacticalvariable/reader |
+| ReaderLM-v2 — HuggingFace | https://huggingface.co/jinaai/ReaderLM-v2 |
+| Paper arXiv 2503.01151 | https://arxiv.org/abs/2503.01151 |
+| jina-ai/reader — GitHub | https://github.com/jina-ai/reader |
 | FastAPI | https://fastapi.tiangolo.com |
 | Poetry | https://python-poetry.org |
-| markdownify | https://github.com/matthewwithanm/python-markdownify |
-| pydantic-settings | https://docs.pydantic.dev/latest/concepts/pydantic_settings/ |
+| HuggingFace Transformers | https://huggingface.co/docs/transformers |
 
 ---
 
-> **Spec Version:** 0.1.0 · Date: 2026-02-22  
-> Minimalist but functional — for intranet, without forced external dependencies.
+> **Spec Version:** 0.2.0 · Date: 2026-02-22 · Engine: Local ReaderLM-v2 (cc-by-nc-4.0)
