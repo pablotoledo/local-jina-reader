@@ -56,6 +56,7 @@ async def _process_url(
     # 4. Fetch / render
     timeout = min(x_timeout or settings.DEFAULT_TIMEOUT_S, settings.MAX_TIMEOUT_S)
     html: str | None = None
+    used_playwright = False
 
     try:
         html = await fetch_static(url, timeout=timeout)
@@ -68,6 +69,7 @@ async def _process_url(
             timeout=timeout,
             wait_for_selector=x_wait_for_selector,
         )
+        used_playwright = True
 
     # 5. Extract main content
     title, body_html = extract_main_content(html, target_selector=x_target_selector)
@@ -83,6 +85,7 @@ async def _process_url(
         content = html_to_markdown(body_html)
 
     elapsed_ms = int((time.monotonic() - t0) * 1000)
+    engine = ("playwright+readability" if used_playwright else "httpx+readability")
 
     result = {
         "url": url,
@@ -91,7 +94,7 @@ async def _process_url(
         "meta": {
             "from_cache": from_cache,
             "elapsed_ms": elapsed_ms,
-            "engine": "playwright+readability" if x_wait_for_selector else "httpx+readability",
+            "engine": engine,
             "accept": accept or "text/markdown",
             "respond_with": respond_with,
         },

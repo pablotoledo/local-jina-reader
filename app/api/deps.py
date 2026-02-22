@@ -10,6 +10,6 @@ async def require_api_key(authorization: str | None = Header(default=None)) -> s
     if authorization is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing Authorization header")
     scheme, _, token = authorization.partition(" ")
-    if scheme.lower() != "bearer" or not verify_api_key(token):
+    if scheme.lower() != "bearer" or not token or not verify_api_key(token):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API key")
     return token

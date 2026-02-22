@@ -24,6 +24,7 @@ def test_cache_key_differs_by_accept():
 def test_cache_key_prefix():
     key = make_cache_key("https://example.com/")
     assert key.startswith("reader:")
+    assert len(key) == 7 + 64  # 'reader:' prefix + sha256 hex digest
 
 
 def test_normalize_url_lowercase():
