@@ -1,0 +1,57 @@
+name: reader-clone
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    container_name: reader-api
+    env_file:
+      - .env
+    environment:
+      APP_ENV: ${APP_ENV:-dev}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      HOST: 0.0.0.0
+      PORT: 8080
+      REDIS_URL: redis://redis:6379/0
+      API_KEYS: ${API_KEYS:-}
+      DEFAULT_TIMEOUT_S: ${DEFAULT_TIMEOUT_S:-15}
+      DEFAULT_CACHE_TTL_S: ${DEFAULT_CACHE_TTL_S:-300}
+      MAX_TIMEOUT_S: ${MAX_TIMEOUT_S:-60}
+      USER_AGENT: ${USER_AGENT:-reader-clone/0.1}
+      ENABLE_SSE: ${ENABLE_SSE:-true}
+      ENABLE_COOKIE_FORWARDING: ${ENABLE_COOKIE_FORWARDING:-false}
+      ALLOW_PRIVATE_NETS: ${ALLOW_PRIVATE_NETS:-false}
+      PLAYWRIGHT_BROWSER: chromium
+      PLAYWRIGHT_HEADLESS: "true"
+      BROWSER_CONTEXTS_MAX: ${BROWSER_CONTEXTS_MAX:-4}
+      PAGES_PER_CONTEXT_MAX: ${PAGES_PER_CONTEXT_MAX:-4}
+    ports:
+      - "8080:8080"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: reader-redis
+    command: ["redis-server", "--appendonly", "no"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  redis_data:
